@@ -16,7 +16,12 @@ gpus_to_use = range(torch.cuda.device_count())
 
 from sam3.model_builder import build_sam3_video_predictor
 
-predictor = build_sam3_video_predictor(checkpoint_path="/data/haoxiang/sam3/models/facebook/sam3/sam3.pt",gpus_to_use=gpus_to_use)
+predictor = build_sam3_video_predictor(
+    checkpoint_path="/data/haoxiang/sam3/models/facebook/sam3/sam3.pt",
+    gpus_to_use=gpus_to_use,
+    # 关闭 temporal disambiguation，避免 hotstart 阶段把候选 obj_id 提前过滤掉
+    apply_temporal_disambiguation=False,
+)
 
 from sam3.visualization_utils import (
     load_frame,
@@ -28,18 +33,26 @@ from sam3.visualization_utils import (
 plt.rcParams["axes.titlesize"] = 12
 plt.rcParams["figure.titlesize"] = 12
 
-def propagate_in_video(predictor, session_id):
-    # we will just propagate from frame 0 to the end of the video
+def propagate_in_video(predictor, session_id, propagation_direction="forward"):
+    # 使用单向传播，避免 "both" 模式下同一 frame 被后续方向覆盖
     outputs_per_frame = {}
     for response in predictor.handle_stream_request(
         request=dict(
             type="propagate_in_video",
             session_id=session_id,
+            propagation_direction=propagation_direction,
         )
     ):
         outputs_per_frame[response["frame_index"]] = response["outputs"]
 
     return outputs_per_frame
+
+
+def print_frame_obj_ids(outputs_per_frame, max_frames=10):
+    frame_indices = sorted(outputs_per_frame.keys())[:max_frames]
+    for idx in frame_indices:
+        obj_ids = outputs_per_frame[idx].get("out_obj_ids", [])
+        print(f"frame {idx}: obj_ids={obj_ids}")
 
 
 def abs_to_rel_coords(coords, IMG_WIDTH, IMG_HEIGHT, coord_type="point"):
@@ -122,3 +135,26 @@ visualize_formatted_frame_output(
     titles=["SAM 3 Dense Tracking outputs"],
     figsize=(6, 4),
 )
+
+# propagate from frame 0 to the end and collect outputs
+outputs_per_frame = propagate_in_video(
+    predictor,
+    session_id,
+    propagation_direction="forward",
+)
+print(f"num propagated frames: {len(outputs_per_frame)}")
+print_frame_obj_ids(outputs_per_frame, max_frames=20)
+
+# reformat for visualization
+outputs_per_frame = prepare_masks_for_visualization(outputs_per_frame)
+
+vis_frame_stride = 60
+plt.close("all")
+for frame_idx in range(0, len(outputs_per_frame), vis_frame_stride):
+    visualize_formatted_frame_output(
+        frame_idx,
+        video_frames_for_vis,
+        outputs_list=[outputs_per_frame],
+        titles=["SAM 3 Dense Tracking outputs"],
+        figsize=(6, 4),
+    )
