@@ -222,6 +222,167 @@ def validate_obj_id_constraints(
     _check_prompt_obj_ids(gripper_right_prompts, gripper_right_obj_id, "GRIPPER_RIGHT_KEYFRAME_PROMPTS")
 
 
+def _median(values):
+    if not values:
+        return None
+    sorted_vals = sorted(float(v) for v in values)
+    n = len(sorted_vals)
+    mid = n // 2
+    if n % 2 == 1:
+        return float(sorted_vals[mid])
+    return float((sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0)
+
+
+def summarize_normalized_prompt_spatial_x(prompt_list, img_w, side_name=""):
+    img_w = max(float(img_w), 1.0)
+    x_all = []
+    x_pos = []
+
+    for p in prompt_list:
+        if not isinstance(p, dict):
+            continue
+        points_rel = p.get("points_rel", [])
+        labels = p.get("labels", [])
+        if not isinstance(points_rel, list):
+            continue
+
+        for i, point in enumerate(points_rel):
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                continue
+
+            x_rel = float(point[0])
+            x_abs = x_rel * img_w
+            x_all.append(float(x_abs))
+
+            label_value = None
+            if isinstance(labels, list) and i < len(labels):
+                try:
+                    label_value = int(labels[i])
+                except Exception:
+                    label_value = None
+            if label_value == 1:
+                x_pos.append(float(x_abs))
+
+    basis_x = list(x_pos) if len(x_pos) > 0 else list(x_all)
+    basis_name = "positive" if len(x_pos) > 0 else "all"
+
+    if len(basis_x) == 0:
+        return {
+            "side_name": str(side_name),
+            "entries": int(len(prompt_list)),
+            "all_points": 0,
+            "pos_points": 0,
+            "basis": basis_name,
+            "basis_points": 0,
+            "x_mean": None,
+            "x_median": None,
+            "left_ratio": None,
+            "right_ratio": None,
+            "dominant_side": "unknown",
+        }
+
+    half_x = img_w / 2.0
+    left_count = sum(1 for x in basis_x if float(x) < half_x)
+    right_count = sum(1 for x in basis_x if float(x) >= half_x)
+    total = len(basis_x)
+
+    return {
+        "side_name": str(side_name),
+        "entries": int(len(prompt_list)),
+        "all_points": int(len(x_all)),
+        "pos_points": int(len(x_pos)),
+        "basis": basis_name,
+        "basis_points": int(total),
+        "x_mean": float(sum(basis_x) / total),
+        "x_median": _median(basis_x),
+        "left_ratio": float(left_count / total),
+        "right_ratio": float(right_count / total),
+        "dominant_side": "unknown",
+    }
+
+
+def diagnose_gripper_prompt_side_consistency(
+    left_prompts,
+    right_prompts,
+    img_w,
+    *,
+    stage_name="stage B",
+    dominance_ratio=0.6,
+):
+    left_stats = summarize_normalized_prompt_spatial_x(
+        prompt_list=left_prompts,
+        img_w=img_w,
+        side_name="left",
+    )
+    right_stats = summarize_normalized_prompt_spatial_x(
+        prompt_list=right_prompts,
+        img_w=img_w,
+        side_name="right",
+    )
+
+    def _attach_dominant(stats):
+        left_ratio = stats.get("left_ratio")
+        right_ratio = stats.get("right_ratio")
+        dominant = "unknown"
+        if left_ratio is not None and right_ratio is not None:
+            if float(left_ratio) >= float(dominance_ratio):
+                dominant = "left"
+            elif float(right_ratio) >= float(dominance_ratio):
+                dominant = "right"
+        stats["dominant_side"] = dominant
+        return stats
+
+    left_stats = _attach_dominant(dict(left_stats))
+    right_stats = _attach_dominant(dict(right_stats))
+
+    print(
+        f"[{stage_name}][diag][spatial][left] entries={left_stats['entries']} "
+        f"all_points={left_stats['all_points']} pos_points={left_stats['pos_points']} "
+        f"basis={left_stats['basis']} basis_points={left_stats['basis_points']} "
+        f"x_mean={left_stats['x_mean']} x_median={left_stats['x_median']} "
+        f"left_ratio={left_stats['left_ratio']} right_ratio={left_stats['right_ratio']} "
+        f"dominant={left_stats['dominant_side']}"
+    )
+    print(
+        f"[{stage_name}][diag][spatial][right] entries={right_stats['entries']} "
+        f"all_points={right_stats['all_points']} pos_points={right_stats['pos_points']} "
+        f"basis={right_stats['basis']} basis_points={right_stats['basis_points']} "
+        f"x_mean={right_stats['x_mean']} x_median={right_stats['x_median']} "
+        f"left_ratio={right_stats['left_ratio']} right_ratio={right_stats['right_ratio']} "
+        f"dominant={right_stats['dominant_side']}"
+    )
+
+    conflict_type = "none"
+    warning = ""
+    if left_stats["basis_points"] > 0 and right_stats["basis_points"] > 0:
+        if left_stats["dominant_side"] == "right" and right_stats["dominant_side"] == "left":
+            conflict_type = "likely_swapped"
+            warning = (
+                "检测到左右标签与空间主侧明显反向：left 点主要在右半区且 right 点主要在左半区。"
+            )
+    elif left_stats["basis_points"] > 0 and right_stats["basis_points"] == 0:
+        if left_stats["dominant_side"] == "right":
+            conflict_type = "left_points_mainly_right"
+            warning = "仅 left 有点，且主要位于右半区；请人工确认 left/right 标注语义。"
+    elif right_stats["basis_points"] > 0 and left_stats["basis_points"] == 0:
+        if right_stats["dominant_side"] == "left":
+            conflict_type = "right_points_mainly_left"
+            warning = "仅 right 有点，且主要位于左半区；请人工确认 left/right 标注语义。"
+
+    if conflict_type != "none":
+        print(f"[{stage_name}][diag][spatial][warn] conflict_type={conflict_type} | {warning}")
+    else:
+        print(f"[{stage_name}][diag][spatial] conflict_type=none")
+
+    return {
+        "left": left_stats,
+        "right": right_stats,
+        "dominance_ratio": float(dominance_ratio),
+        "conflict_type": conflict_type,
+        "warning": warning,
+    }
+
+
 def propagate_in_video(predictor_obj, session_id_value, propagation_direction="forward"):
     outputs_per_frame = {}
     for response in predictor_obj.handle_stream_request(

@@ -78,6 +78,7 @@ def append_click(
     )
 
 
+
 def seed_store_from_prompt_list(
     store: MutableMapping[str, Dict[int, List[Dict[str, int]]]],
     obj_key: str,
@@ -231,9 +232,127 @@ def validate_export_prompt_map(prompt_map: Mapping[str, Any]) -> Dict[str, Promp
     )
 
 
+def _median(values: List[float]) -> Optional[float]:
+    if len(values) == 0:
+        return None
+    sorted_vals = sorted(float(v) for v in values)
+    n = len(sorted_vals)
+    mid = n // 2
+    if n % 2 == 1:
+        return float(sorted_vals[mid])
+    return float((sorted_vals[mid - 1] + sorted_vals[mid]) / 2.0)
+
+
+def summarize_gripper_store_spatial_side_consistency(
+    annotation_store: Mapping[str, Mapping[int, List[Dict[str, int]]]],
+    img_width: int,
+    *,
+    left_key: str = "gripper_left",
+    right_key: str = "gripper_right",
+    dominance_ratio: float = 0.6,
+) -> Dict[str, Any]:
+    img_w = max(float(img_width), 1.0)
+
+    def _collect_side_stats(side_key: str, side_name: str) -> Dict[str, Any]:
+        x_all: List[float] = []
+        x_pos: List[float] = []
+        entries = 0
+
+        frame_map = annotation_store.get(side_key, {})
+        for clicks in frame_map.values():
+            if not isinstance(clicks, list):
+                continue
+            if len(clicks) > 0:
+                entries += 1
+            for c in clicks:
+                if not isinstance(c, Mapping):
+                    continue
+                try:
+                    x = float(c["x"])
+                    lb = int(c.get("label", 1))
+                except Exception:
+                    continue
+                x_all.append(x)
+                if lb == 1:
+                    x_pos.append(x)
+
+        basis_x = list(x_pos) if len(x_pos) > 0 else list(x_all)
+        basis = "positive" if len(x_pos) > 0 else "all"
+        if len(basis_x) == 0:
+            return {
+                "side_name": side_name,
+                "entries": int(entries),
+                "all_points": 0,
+                "pos_points": 0,
+                "basis": basis,
+                "basis_points": 0,
+                "x_mean": None,
+                "x_median": None,
+                "left_ratio": None,
+                "right_ratio": None,
+                "dominant_side": "unknown",
+            }
+
+        half = img_w / 2.0
+        left_count = sum(1 for x in basis_x if x < half)
+        right_count = sum(1 for x in basis_x if x >= half)
+        total = len(basis_x)
+
+        dominant = "unknown"
+        left_ratio = float(left_count / total)
+        right_ratio = float(right_count / total)
+        if left_ratio >= float(dominance_ratio):
+            dominant = "left"
+        elif right_ratio >= float(dominance_ratio):
+            dominant = "right"
+
+        return {
+            "side_name": side_name,
+            "entries": int(entries),
+            "all_points": int(len(x_all)),
+            "pos_points": int(len(x_pos)),
+            "basis": basis,
+            "basis_points": int(total),
+            "x_mean": float(sum(basis_x) / total),
+            "x_median": _median(basis_x),
+            "left_ratio": left_ratio,
+            "right_ratio": right_ratio,
+            "dominant_side": dominant,
+        }
+
+    left_stats = _collect_side_stats(left_key, "left")
+    right_stats = _collect_side_stats(right_key, "right")
+
+    conflict_type = "none"
+    warning = ""
+    if left_stats["basis_points"] > 0 and right_stats["basis_points"] > 0:
+        if left_stats["dominant_side"] == "right" and right_stats["dominant_side"] == "left":
+            conflict_type = "likely_swapped"
+            warning = (
+                "left 点主要在右半区且 right 点主要在左半区，请复核左右对象选择。"
+            )
+    elif left_stats["basis_points"] > 0 and right_stats["basis_points"] == 0:
+        if left_stats["dominant_side"] == "right":
+            conflict_type = "left_points_mainly_right"
+            warning = "仅 left 有点且主要在右半区，请复核 left/right 选择。"
+    elif right_stats["basis_points"] > 0 and left_stats["basis_points"] == 0:
+        if right_stats["dominant_side"] == "left":
+            conflict_type = "right_points_mainly_left"
+            warning = "仅 right 有点且主要在左半区，请复核 left/right 选择。"
+
+    return {
+        "left": left_stats,
+        "right": right_stats,
+        "dominance_ratio": float(dominance_ratio),
+        "conflict_type": conflict_type,
+        "warning": warning,
+    }
+
+
 def summarize_prompt_map(prompt_map: Mapping[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
     entries_per_object: Dict[str, int] = {}
     points_per_object: Dict[str, int] = {}
+    frame_point_counts_per_object: Dict[str, Dict[int, int]] = {}
     unique_frames = set()
 
     for key in ANNOTATION_PROMPT_KEYS:
@@ -243,6 +362,7 @@ def summarize_prompt_map(prompt_map: Mapping[str, List[Dict[str, Any]]]) -> Dict
 
         entries_per_object[key] = len(prompt_list)
         point_count = 0
+        frame_point_counts: Dict[int, int] = {}
         for idx, entry in enumerate(prompt_list):
             if not isinstance(entry, Mapping):
                 raise ValueError(f"[annotation] prompts[{key}][{idx}] 必须为 dict")
@@ -250,7 +370,8 @@ def summarize_prompt_map(prompt_map: Mapping[str, List[Dict[str, Any]]]) -> Dict
                 raise ValueError(f"[annotation] prompts[{key}][{idx}] 缺少 frame_index")
 
             try:
-                unique_frames.add(int(entry["frame_index"]))
+                frame_idx = int(entry["frame_index"])
+                unique_frames.add(frame_idx)
             except Exception as e:
                 raise ValueError(
                     f"[annotation] prompts[{key}][{idx}].frame_index 无法转换为整数"
@@ -260,12 +381,31 @@ def summarize_prompt_map(prompt_map: Mapping[str, List[Dict[str, Any]]]) -> Dict
             if not isinstance(points, list):
                 raise ValueError(f"[annotation] prompts[{key}][{idx}].points 必须为 list")
             point_count += len(points)
+            frame_point_counts[frame_idx] = int(frame_point_counts.get(frame_idx, 0) + len(points))
 
         points_per_object[key] = point_count
+        frame_point_counts_per_object[key] = {
+            int(f): int(frame_point_counts[f]) for f in sorted(frame_point_counts.keys())
+        }
+
+    left_key = "GRIPPER_LEFT_KEYFRAME_PROMPTS"
+    right_key = "GRIPPER_RIGHT_KEYFRAME_PROMPTS"
+    left_counts = frame_point_counts_per_object.get(left_key, {})
+    right_counts = frame_point_counts_per_object.get(right_key, {})
+    gripper_frame_count_warnings: List[str] = []
+    for frame_idx in sorted(set(left_counts.keys()) | set(right_counts.keys())):
+        left_count = int(left_counts.get(frame_idx, 0))
+        right_count = int(right_counts.get(frame_idx, 0))
+        if left_count != right_count:
+            gripper_frame_count_warnings.append(
+                f"frame={frame_idx}: left_points={left_count}, right_points={right_count}"
+            )
 
     return {
         "entries_per_object": entries_per_object,
         "points_per_object": points_per_object,
+        "frame_point_counts_per_object": frame_point_counts_per_object,
+        "gripper_frame_count_warnings": gripper_frame_count_warnings,
         "num_frames_with_prompts": len(unique_frames),
     }
 
@@ -293,7 +433,10 @@ def save_annotation_prompts_json(
     print(f"{status_prefix} JSON 导出成功: {out_path}")
     print(f"{status_prefix} 对象条目统计: {summary['entries_per_object']}")
     print(f"{status_prefix} 对象点数统计: {summary['points_per_object']}")
+    print(f"{status_prefix} 按对象逐帧点数统计: {summary['frame_point_counts_per_object']}")
     print(f"{status_prefix} 含标注帧数: {summary['num_frames_with_prompts']}")
+    for warn in summary.get("gripper_frame_count_warnings", []):
+        print(f"{status_prefix} [warn][gripper_frame_count] {warn}")
 
     return payload
 
@@ -324,13 +467,18 @@ def load_annotation_prompts_json(
     else:
         prompts_raw = payload
 
+    created_at_utc = payload.get("created_at_utc") if isinstance(payload, dict) else None
     prompts = validate_export_prompt_map(prompts_raw)
     summary = summarize_prompt_map(prompts)
 
     print(f"{status_prefix} JSON 读取成功: {in_path}")
+    print(f"{status_prefix} JSON created_at_utc: {created_at_utc}")
     print(f"{status_prefix} 对象条目统计: {summary['entries_per_object']}")
     print(f"{status_prefix} 对象点数统计: {summary['points_per_object']}")
+    print(f"{status_prefix} 按对象逐帧点数统计: {summary['frame_point_counts_per_object']}")
     print(f"{status_prefix} 含标注帧数: {summary['num_frames_with_prompts']}")
+    for warn in summary.get("gripper_frame_count_warnings", []):
+        print(f"{status_prefix} [warn][gripper_frame_count] {warn}")
 
     return prompts
 
@@ -360,6 +508,10 @@ def create_annotation_ui(
 
     frame_min = 0
     frame_max = max(0, int(total_frames) - 1)
+    for obj_key in object_specs.keys():
+        annotation_store[str(obj_key)] = {}
+    print(f"{status_prefix} 已清空历史标注缓存：本次会话从空白标注开始")
+
     state = AnnotationUIState(
         annotation_store=annotation_store,
         object_specs=dict(object_specs),
@@ -416,10 +568,14 @@ def create_annotation_ui(
         description="Point Label",
         layout=widgets.Layout(width="380px"),
     )
-
     clear_btn = widgets.Button(
         description="Clear Current Obj@Frame",
         button_style="warning",
+        layout=widgets.Layout(width="220px"),
+    )
+    clear_all_btn = widgets.Button(
+        description="Clear All Annotations",
+        button_style="danger",
         layout=widgets.Layout(width="220px"),
     )
     refresh_btn = widgets.Button(
@@ -482,6 +638,7 @@ def create_annotation_ui(
         "point_artists": [],
         "text_artists": [],
         "last_frame_idx": None,
+        "last_click_diag": None,
     }
 
     def _sync_frame_value(v: Any) -> int:
@@ -560,7 +717,10 @@ def create_annotation_ui(
                 f"{status_prefix} 当前对象={object_specs[obj_key]['display']} "
                 f"frame={frame_idx} 点数={len(clicks)} trigger={trigger}"
             )
+            if render_state.get("last_click_diag"):
+                print(render_state["last_click_diag"])
             print(f"{status_prefix} 点击图像可添加点；绿色=o=positive(1)，红色=x=negative(0)")
+            print(f"{status_prefix} 同一对象同一帧可连续点多个点；切换对象/帧后数据严格隔离。")
 
         if force_draw:
             ann_fig.canvas.draw()
@@ -578,6 +738,15 @@ def create_annotation_ui(
         y = max(0, min(int(img_height) - 1, y))
 
         append_click(annotation_store, obj_key, frame_idx, x, y, point_label)
+
+        current_points = len(annotation_store[obj_key].get(frame_idx, []))
+        click_diag = (
+            f"{status_prefix} [diag][write_target] frame_idx={frame_idx} object_key={obj_key} "
+            f"point={[x, y]} label={point_label} current_obj_frame_points={current_points}"
+        )
+        render_state["last_click_diag"] = click_diag
+        print(click_diag)
+
         _draw_annotation_canvas(trigger="click_add", force_draw=True)
 
     def _on_clear_clicked(_: Any) -> None:
@@ -585,6 +754,12 @@ def create_annotation_ui(
         if frame_idx in annotation_store[obj_key]:
             annotation_store[obj_key].pop(frame_idx, None)
         _draw_annotation_canvas(trigger="clear", force_draw=True, full_reset=True)
+
+    def _on_clear_all_clicked(_: Any) -> None:
+        for k in list(annotation_store.keys()):
+            annotation_store[k] = {}
+        render_state["last_click_diag"] = f"{status_prefix} [diag] 已清空所有对象、所有帧标注"
+        _draw_annotation_canvas(trigger="clear_all", force_draw=True, full_reset=True)
 
     def _on_refresh_clicked(_: Any) -> None:
         _draw_annotation_canvas(trigger="refresh", force_draw=True, full_reset=True)
@@ -627,9 +802,44 @@ def create_annotation_ui(
             print(f"{status_prefix} 导出完成，已自动设置 USE_VISUAL_ANNOTATION_EXPORT=True")
             print(f"{status_prefix} 对象条目统计: {summary['entries_per_object']}")
             print(f"{status_prefix} 对象点数统计: {summary['points_per_object']}")
+            print(f"{status_prefix} 按对象逐帧点数统计: {summary['frame_point_counts_per_object']}")
             print(f"{status_prefix} 含标注帧数: {summary['num_frames_with_prompts']}")
+            for warn in summary.get("gripper_frame_count_warnings", []):
+                print(f"{status_prefix} [warn][gripper_frame_count] {warn}")
+
+            spatial_diag = summarize_gripper_store_spatial_side_consistency(
+                annotation_store=annotation_store,
+                img_width=img_width,
+                left_key="gripper_left",
+                right_key="gripper_right",
+                dominance_ratio=0.6,
+            )
+            left_stats = spatial_diag["left"]
+            right_stats = spatial_diag["right"]
+            print(
+                f"{status_prefix} [diag][spatial][left] entries={left_stats['entries']} "
+                f"all_points={left_stats['all_points']} pos_points={left_stats['pos_points']} "
+                f"basis={left_stats['basis']} basis_points={left_stats['basis_points']} "
+                f"x_mean={left_stats['x_mean']} x_median={left_stats['x_median']} "
+                f"left_ratio={left_stats['left_ratio']} right_ratio={left_stats['right_ratio']} "
+                f"dominant={left_stats['dominant_side']}"
+            )
+            print(
+                f"{status_prefix} [diag][spatial][right] entries={right_stats['entries']} "
+                f"all_points={right_stats['all_points']} pos_points={right_stats['pos_points']} "
+                f"basis={right_stats['basis']} basis_points={right_stats['basis_points']} "
+                f"x_mean={right_stats['x_mean']} x_median={right_stats['x_median']} "
+                f"left_ratio={right_stats['left_ratio']} right_ratio={right_stats['right_ratio']} "
+                f"dominant={right_stats['dominant_side']}"
+            )
+            if spatial_diag.get("conflict_type") != "none":
+                print(
+                    f"{status_prefix} [diag][spatial][warn] conflict_type={spatial_diag['conflict_type']} "
+                    f"message={spatial_diag['warning']}"
+                )
+
             if save_json_on_export and export_json_path:
-                print(f"{status_prefix} JSON 文件: {export_json_path}")
+                print(f"{status_prefix} JSON 文件(覆盖写入): {export_json_path}")
             print(f"{status_prefix} 导出结构（可直接被 Stage A/B 消费）:")
             print(json.dumps(state.export_prompts, ensure_ascii=False, indent=2))
 
@@ -637,6 +847,7 @@ def create_annotation_ui(
     object_dropdown.observe(_on_object_changed, names="value")
     label_toggle.observe(_on_label_changed, names="value")
     clear_btn.on_click(_on_clear_clicked)
+    clear_all_btn.on_click(_on_clear_all_clicked)
     refresh_btn.on_click(_on_refresh_clicked)
     export_btn.on_click(_on_export_clicked)
     ann_fig.canvas.mpl_connect("button_press_event", _on_canvas_click)
@@ -645,7 +856,7 @@ def create_annotation_ui(
         [
             widgets.HBox([frame_input, object_dropdown]),
             widgets.HBox([label_toggle]),
-            widgets.HBox([clear_btn, refresh_btn, export_btn]),
+            widgets.HBox([clear_btn, clear_all_btn, refresh_btn, export_btn]),
             status_out,
             export_out,
         ]
