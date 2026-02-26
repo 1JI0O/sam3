@@ -185,18 +185,15 @@ def validate_and_normalize_prompt_list(
 
 
 def validate_obj_id_constraints(
-    arm_left_obj_id,
-    arm_right_obj_id,
+    arm_cable_obj_id,
     gripper_left_obj_id,
     gripper_right_obj_id,
-    arm_left_prompts,
-    arm_right_prompts,
+    arm_cable_prompts,
     gripper_left_prompts,
     gripper_right_prompts,
 ):
     obj_items = [
-        ("arm_left_obj_id", arm_left_obj_id),
-        ("arm_right_obj_id", arm_right_obj_id),
+        ("arm_cable_obj_id", arm_cable_obj_id),
         ("gripper_left_obj_id", gripper_left_obj_id),
         ("gripper_right_obj_id", gripper_right_obj_id),
     ]
@@ -206,10 +203,10 @@ def validate_obj_id_constraints(
             raise ValueError(f"{name} 不能为空且必须为 int，当前: {obj_id}")
 
     all_obj_ids = [obj_id for _, obj_id in obj_items]
-    if len(set(all_obj_ids)) != 4:
+    if len(set(all_obj_ids)) != 3:
         raise ValueError(
-            "对象 ID 冲突：arm_left_obj_id / arm_right_obj_id / "
-            "gripper_left_obj_id / gripper_right_obj_id 必须互不重复，当前="
+            "对象 ID 冲突：arm_cable_obj_id / gripper_left_obj_id / "
+            "gripper_right_obj_id 必须互不重复，当前="
             f"{all_obj_ids}"
         )
 
@@ -220,8 +217,7 @@ def validate_obj_id_constraints(
                     f"{prompt_tag}[{i}].obj_id={p['obj_id']} 与期望 obj_id={expected_obj_id} 不一致"
                 )
 
-    _check_prompt_obj_ids(arm_left_prompts, arm_left_obj_id, "ARM_LEFT_INITIAL_PROMPTS")
-    _check_prompt_obj_ids(arm_right_prompts, arm_right_obj_id, "ARM_RIGHT_INITIAL_PROMPTS")
+    _check_prompt_obj_ids(arm_cable_prompts, arm_cable_obj_id, "ARM_CABLE_INITIAL_PROMPTS")
     _check_prompt_obj_ids(gripper_left_prompts, gripper_left_obj_id, "GRIPPER_LEFT_KEYFRAME_PROMPTS")
     _check_prompt_obj_ids(gripper_right_prompts, gripper_right_obj_id, "GRIPPER_RIGHT_KEYFRAME_PROMPTS")
 
@@ -414,6 +410,86 @@ def _to_binary_mask(mask):
     return (mask > 0).astype(np.uint8) * 255
 
 
+def iter_object_masks_from_frame_output(frame_outputs):
+    """
+    统一解析单帧输出结构，兼容两种格式：
+    1) 原始 predictor 输出：{"out_obj_ids": ..., "out_binary_masks": ...}
+    2) 已处理输出：{obj_id: binary_mask}
+
+    Yields:
+        (obj_id_int, mask)
+    """
+    if not isinstance(frame_outputs, dict):
+        return
+
+    # 优先解析 SAM3 原始输出结构（按 out_obj_ids 与 out_binary_masks 对齐）
+    if "out_obj_ids" in frame_outputs and "out_binary_masks" in frame_outputs:
+        out_obj_ids = frame_outputs.get("out_obj_ids", [])
+        out_binary_masks = frame_outputs.get("out_binary_masks", [])
+
+        try:
+            obj_id_list = out_obj_ids.tolist() if hasattr(out_obj_ids, "tolist") else list(out_obj_ids)
+        except Exception:
+            obj_id_list = []
+
+        try:
+            mask_list = list(out_binary_masks)
+        except Exception:
+            mask_list = []
+
+        pair_count = min(len(obj_id_list), len(mask_list))
+        for i in range(pair_count):
+            try:
+                obj_id_int = int(obj_id_list[i])
+            except (TypeError, ValueError):
+                continue
+            yield obj_id_int, mask_list[i]
+        return
+
+    # 回退：将 dict 键视为对象 ID（跳过元数据键）
+    for obj_id, mask in frame_outputs.items():
+        if isinstance(obj_id, bool):
+            continue
+        try:
+            obj_id_int = int(obj_id)
+        except (TypeError, ValueError):
+            continue
+        yield obj_id_int, mask
+
+
+def sample_obj_ids_from_outputs(outputs_per_frame, max_frames=5, max_obj_ids=12):
+    """返回用于调试的 obj_id 样例：[(frame_idx, [obj_id,...]), ...]"""
+    samples = []
+    frame_indices = sorted(int(k) for k in outputs_per_frame.keys())[: max(int(max_frames), 0)]
+
+    for frame_idx in frame_indices:
+        frame_outputs = outputs_per_frame.get(frame_idx, {})
+        obj_ids = []
+        for obj_id_int, _ in iter_object_masks_from_frame_output(frame_outputs):
+            obj_ids.append(int(obj_id_int))
+            if len(obj_ids) >= max(int(max_obj_ids), 1):
+                break
+        samples.append((int(frame_idx), sorted(set(obj_ids))))
+
+    return samples
+
+
+def collect_present_obj_ids(outputs_per_frame, target_obj_ids=None):
+    """
+    收集 outputs 中实际出现的对象 ID。
+    若 target_obj_ids 不为空，则只返回其子集。
+    """
+    target_set = None if target_obj_ids is None else set(int(x) for x in target_obj_ids)
+    present = set()
+
+    for frame_outputs in outputs_per_frame.values():
+        for obj_id_int, _ in iter_object_masks_from_frame_output(frame_outputs):
+            if target_set is None or int(obj_id_int) in target_set:
+                present.add(int(obj_id_int))
+
+    return sorted(present)
+
+
 def save_masks_for_propainter(
     outputs_per_frame,
     video_frames,
@@ -440,9 +516,9 @@ def save_masks_for_propainter(
     for frame_idx in range(num_frames):
         combined_mask = np.zeros((img_h, img_w), dtype=np.uint8)
 
-        obj_dict = outputs_per_frame.get(frame_idx, {})
-        for obj_id, mask in obj_dict.items():
-            if int(obj_id) not in target_set:
+        frame_outputs = outputs_per_frame.get(frame_idx, {})
+        for obj_id_int, mask in iter_object_masks_from_frame_output(frame_outputs):
+            if int(obj_id_int) not in target_set:
                 continue
 
             binary = _to_binary_mask(mask)
@@ -507,9 +583,9 @@ def save_arm_only_masks_for_propainter(
         arm_union = np.zeros((img_h, img_w), dtype=np.uint8)
         gripper_union = np.zeros((img_h, img_w), dtype=np.uint8)
 
-        obj_dict = outputs_per_frame.get(frame_idx, {})
-        for obj_id, mask in obj_dict.items():
-            obj_id_int = int(obj_id)
+        frame_outputs = outputs_per_frame.get(frame_idx, {})
+        for obj_id_int, mask in iter_object_masks_from_frame_output(frame_outputs):
+            obj_id_int = int(obj_id_int)
             if obj_id_int not in arm_set and obj_id_int not in gripper_set:
                 continue
 

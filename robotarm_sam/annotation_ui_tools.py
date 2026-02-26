@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional
 import json
 
@@ -8,6 +10,18 @@ import json
 AnnotationObjectSpecs = Dict[str, Dict[str, Any]]
 AnnotationStore = Dict[str, Dict[int, List[Dict[str, int]]]]
 PromptList = List[Dict[str, Any]]
+
+
+ANNOTATION_PROMPT_KEYS = (
+    "ARM_CABLE_INITIAL_PROMPTS",
+    "GRIPPER_LEFT_KEYFRAME_PROMPTS",
+    "GRIPPER_RIGHT_KEYFRAME_PROMPTS",
+)
+
+LEGACY_ARM_PROMPT_KEYS = (
+    "ARM_LEFT_INITIAL_PROMPTS",
+    "ARM_RIGHT_INITIAL_PROMPTS",
+)
 
 
 @dataclass
@@ -23,21 +37,15 @@ class AnnotationUIState:
 
 
 def build_annotation_object_specs(
-    arm_left_obj_id: int,
-    arm_right_obj_id: int,
+    arm_cable_obj_id: int,
     gripper_left_obj_id: int,
     gripper_right_obj_id: int,
 ) -> AnnotationObjectSpecs:
     return {
-        "arm_left": {
-            "display": "左臂",
-            "obj_id": int(arm_left_obj_id),
-            "target": "ARM_LEFT_INITIAL_PROMPTS",
-        },
-        "arm_right": {
-            "display": "右臂",
-            "obj_id": int(arm_right_obj_id),
-            "target": "ARM_RIGHT_INITIAL_PROMPTS",
+        "arm_cable": {
+            "display": "机械臂+线缆",
+            "obj_id": int(arm_cable_obj_id),
+            "target": "ARM_CABLE_INITIAL_PROMPTS",
         },
         "gripper_left": {
             "display": "左夹爪",
@@ -148,6 +156,185 @@ def store_to_export_prompts(
     return export_prompts
 
 
+def validate_export_prompt_map(prompt_map: Mapping[str, Any]) -> Dict[str, PromptList]:
+    if not isinstance(prompt_map, Mapping):
+        raise ValueError("[annotation] prompts 必须为包含对象提示的 dict")
+
+    has_all_new_keys = all(k in prompt_map for k in ANNOTATION_PROMPT_KEYS)
+    has_any_legacy_arm_keys = any(k in prompt_map for k in LEGACY_ARM_PROMPT_KEYS)
+
+    normalized: Dict[str, PromptList] = {}
+
+    if has_all_new_keys:
+        for key in ANNOTATION_PROMPT_KEYS:
+            prompt_list_raw = prompt_map[key]
+            if not isinstance(prompt_list_raw, (list, tuple)):
+                raise ValueError(f"[annotation] prompts[{key}] 必须为 list")
+            normalized[key] = list(prompt_list_raw)
+
+        if has_any_legacy_arm_keys:
+            print(
+                "[annotation][warn] 检测到旧字段 ARM_LEFT/ARM_RIGHT_*；"
+                "当前已优先使用 ARM_CABLE_INITIAL_PROMPTS，旧字段将被忽略。"
+            )
+
+        return normalized
+
+    if has_any_legacy_arm_keys:
+        missing_legacy = [k for k in LEGACY_ARM_PROMPT_KEYS if k not in prompt_map]
+        if missing_legacy:
+            raise ValueError(
+                "[annotation] 检测到旧版 arm 字段但不完整，缺少: "
+                + ", ".join(missing_legacy)
+                + "；请补齐旧字段后自动迁移，或改用新字段 ARM_CABLE_INITIAL_PROMPTS。"
+            )
+
+        gripper_missing = [
+            k
+            for k in ("GRIPPER_LEFT_KEYFRAME_PROMPTS", "GRIPPER_RIGHT_KEYFRAME_PROMPTS")
+            if k not in prompt_map
+        ]
+        if gripper_missing:
+            raise ValueError(
+                "[annotation] prompts 缺少必要 gripper 键: "
+                + ", ".join(gripper_missing)
+                + "；旧版兼容仅自动合并 arm 字段。"
+            )
+
+        arm_left_raw = prompt_map["ARM_LEFT_INITIAL_PROMPTS"]
+        arm_right_raw = prompt_map["ARM_RIGHT_INITIAL_PROMPTS"]
+        if not isinstance(arm_left_raw, (list, tuple)):
+            raise ValueError("[annotation] prompts[ARM_LEFT_INITIAL_PROMPTS] 必须为 list")
+        if not isinstance(arm_right_raw, (list, tuple)):
+            raise ValueError("[annotation] prompts[ARM_RIGHT_INITIAL_PROMPTS] 必须为 list")
+
+        print(
+            "[annotation][warn] 检测到旧字段 ARM_LEFT_INITIAL_PROMPTS/ARM_RIGHT_INITIAL_PROMPTS；"
+            "已自动合并为 ARM_CABLE_INITIAL_PROMPTS。"
+        )
+
+        normalized["ARM_CABLE_INITIAL_PROMPTS"] = list(arm_left_raw) + list(arm_right_raw)
+
+        for key in ("GRIPPER_LEFT_KEYFRAME_PROMPTS", "GRIPPER_RIGHT_KEYFRAME_PROMPTS"):
+            prompt_list_raw = prompt_map[key]
+            if not isinstance(prompt_list_raw, (list, tuple)):
+                raise ValueError(f"[annotation] prompts[{key}] 必须为 list")
+            normalized[key] = list(prompt_list_raw)
+
+        return normalized
+
+    missing = [k for k in ANNOTATION_PROMPT_KEYS if k not in prompt_map]
+    raise ValueError(
+        "[annotation] prompts 缺少必要键: "
+        + ", ".join(missing)
+        + f"；必须包含: {', '.join(ANNOTATION_PROMPT_KEYS)}"
+    )
+
+
+def summarize_prompt_map(prompt_map: Mapping[str, List[Dict[str, Any]]]) -> Dict[str, Any]:
+    entries_per_object: Dict[str, int] = {}
+    points_per_object: Dict[str, int] = {}
+    unique_frames = set()
+
+    for key in ANNOTATION_PROMPT_KEYS:
+        prompt_list = prompt_map.get(key, [])
+        if not isinstance(prompt_list, list):
+            raise ValueError(f"[annotation] prompts[{key}] 必须为 list")
+
+        entries_per_object[key] = len(prompt_list)
+        point_count = 0
+        for idx, entry in enumerate(prompt_list):
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"[annotation] prompts[{key}][{idx}] 必须为 dict")
+            if "frame_index" not in entry:
+                raise ValueError(f"[annotation] prompts[{key}][{idx}] 缺少 frame_index")
+
+            try:
+                unique_frames.add(int(entry["frame_index"]))
+            except Exception as e:
+                raise ValueError(
+                    f"[annotation] prompts[{key}][{idx}].frame_index 无法转换为整数"
+                ) from e
+
+            points = entry.get("points", [])
+            if not isinstance(points, list):
+                raise ValueError(f"[annotation] prompts[{key}][{idx}].points 必须为 list")
+            point_count += len(points)
+
+        points_per_object[key] = point_count
+
+    return {
+        "entries_per_object": entries_per_object,
+        "points_per_object": points_per_object,
+        "num_frames_with_prompts": len(unique_frames),
+    }
+
+
+def save_annotation_prompts_json(
+    export_prompts: Mapping[str, Any],
+    json_path: str,
+    status_prefix: str = "[annotation]",
+) -> Dict[str, Any]:
+    prompts_to_save = validate_export_prompt_map(export_prompts)
+    summary = summarize_prompt_map(prompts_to_save)
+
+    payload: Dict[str, Any] = {
+        "format": "sam3.annotation_prompts.v1",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "prompts": prompts_to_save,
+        "stats": summary,
+    }
+
+    out_path = Path(json_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    print(f"{status_prefix} JSON 导出成功: {out_path}")
+    print(f"{status_prefix} 对象条目统计: {summary['entries_per_object']}")
+    print(f"{status_prefix} 对象点数统计: {summary['points_per_object']}")
+    print(f"{status_prefix} 含标注帧数: {summary['num_frames_with_prompts']}")
+
+    return payload
+
+
+def load_annotation_prompts_json(
+    json_path: str,
+    status_prefix: str = "[annotation]",
+) -> Dict[str, PromptList]:
+    in_path = Path(json_path)
+    if not in_path.exists():
+        raise FileNotFoundError(
+            f"{status_prefix} JSON 文件不存在: {in_path}；已阻断流程，请先完成导出或修正路径"
+        )
+
+    try:
+        with in_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"{status_prefix} JSON 解析失败: {in_path}（{e.msg} at line {e.lineno}, col {e.colno}）"
+        ) from e
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"{status_prefix} JSON 顶层必须为 dict: {in_path}")
+
+    if "prompts" in payload:
+        prompts_raw = payload["prompts"]
+    else:
+        prompts_raw = payload
+
+    prompts = validate_export_prompt_map(prompts_raw)
+    summary = summarize_prompt_map(prompts)
+
+    print(f"{status_prefix} JSON 读取成功: {in_path}")
+    print(f"{status_prefix} 对象条目统计: {summary['entries_per_object']}")
+    print(f"{status_prefix} 对象点数统计: {summary['points_per_object']}")
+    print(f"{status_prefix} 含标注帧数: {summary['num_frames_with_prompts']}")
+
+    return prompts
+
+
 def create_annotation_ui(
     *,
     video_frames_for_vis: List[Any],
@@ -159,6 +346,8 @@ def create_annotation_ui(
     on_export: Optional[Callable[[Dict[str, PromptList]], None]] = None,
     auto_display: bool = True,
     status_prefix: str = "[annotation]",
+    export_json_path: Optional[str] = None,
+    save_json_on_export: bool = True,
 ) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "widget_ready": False,
@@ -193,6 +382,7 @@ def create_annotation_ui(
         import ipywidgets as widgets
         from IPython.display import display
         import matplotlib.pyplot as plt
+        from matplotlib import font_manager
     except Exception as e:  # pragma: no cover - notebook runtime fallback path
         result["widget_error"] = e
         return result
@@ -203,15 +393,19 @@ def create_annotation_ui(
         layout=widgets.Layout(width="220px"),
     )
 
+    object_options = [
+        (
+            f"{spec['display']} (obj_id={spec['obj_id']})",
+            key,
+        )
+        for key, spec in object_specs.items()
+    ]
+    if len(object_options) == 0:
+        raise ValueError("[annotation] object_specs 不能为空")
+
     object_dropdown = widgets.Dropdown(
-        options=[
-            (
-                f"{spec['display']} (obj_id={spec['obj_id']})",
-                key,
-            )
-            for key, spec in object_specs.items()
-        ],
-        value="arm_left",
+        options=object_options,
+        value=object_options[0][1],
         description="Object",
         layout=widgets.Layout(width="380px"),
     )
@@ -242,6 +436,40 @@ def create_annotation_ui(
     status_out = widgets.Output(layout=widgets.Layout(border="1px solid #aaa"))
     export_out = widgets.Output(layout=widgets.Layout(border="1px solid #aaa"))
 
+    def _configure_matplotlib_fonts() -> None:
+        candidate_fonts = [
+            "SimHei",
+            "Microsoft YaHei",
+            "Noto Sans CJK SC",
+            "Noto Sans CJK JP",
+            "Noto Sans CJK TC",
+            "Source Han Sans SC",
+            "WenQuanYi Zen Hei",
+            "PingFang SC",
+            "Arial Unicode MS",
+            "DejaVu Sans",
+        ]
+
+        installed_font_names = {f.name for f in font_manager.fontManager.ttflist}
+        preferred_fonts = [f for f in candidate_fonts if f in installed_font_names]
+        fallback_chain = preferred_fonts if preferred_fonts else ["DejaVu Sans"]
+
+        plt.rcParams["font.family"] = "sans-serif"
+        plt.rcParams["font.sans-serif"] = fallback_chain
+        plt.rcParams["axes.unicode_minus"] = False
+
+        resolved_path = font_manager.findfont(
+            font_manager.FontProperties(family=fallback_chain),
+            fallback_to_default=True,
+        )
+        resolved_name = font_manager.FontProperties(fname=resolved_path).get_name()
+        print(
+            f"{status_prefix} matplotlib 字体={resolved_name} "
+            f"(fallback={fallback_chain}) unicode_minus={plt.rcParams['axes.unicode_minus']}"
+        )
+
+    _configure_matplotlib_fonts()
+
     plt.close("all")
     ann_fig, ann_ax = plt.subplots(1, 1, figsize=(9, 6))
     ann_fig.canvas.toolbar_visible = True
@@ -250,6 +478,11 @@ def create_annotation_ui(
         return max(frame_min, min(frame_max, int(v)))
 
     frame_sync_lock = {"active": False}
+    render_state: Dict[str, Any] = {
+        "point_artists": [],
+        "text_artists": [],
+        "last_frame_idx": None,
+    }
 
     def _sync_frame_value(v: Any) -> int:
         clamped = _clamp_frame_value(v)
@@ -265,26 +498,52 @@ def create_annotation_ui(
         frame_idx = _sync_frame_value(frame_input.value)
         return int(frame_idx), str(object_dropdown.value), int(label_toggle.value)
 
-    def _draw_annotation_canvas(force_draw: bool = False) -> None:
+    def _clear_previous_point_artists() -> None:
+        for artist in render_state["point_artists"] + render_state["text_artists"]:
+            try:
+                artist.remove()
+            except Exception:
+                pass
+        render_state["point_artists"].clear()
+        render_state["text_artists"].clear()
+
+    def _draw_annotation_canvas(
+        force_draw: bool = False,
+        *,
+        trigger: str = "manual",
+        full_reset: bool = False,
+    ) -> None:
         frame_idx, obj_key, _ = _current_ctx()
         frame = video_frames_for_vis[frame_idx]
 
-        ann_ax.clear()
-        ann_ax.imshow(frame)
+        _clear_previous_point_artists()
+
+        if full_reset or render_state["last_frame_idx"] != frame_idx:
+            ann_ax.cla()
+            ann_ax.imshow(frame)
+            ann_ax.set_axis_off()
+            render_state["last_frame_idx"] = frame_idx
+
         ann_ax.set_title(
             f"Frame={frame_idx} | Object={object_specs[obj_key]['display']} "
             f"(obj_id={object_specs[obj_key]['obj_id']}) | "
             f"CurrentLabel={label_toggle.value}"
         )
-        ann_ax.set_axis_off()
 
         clicks = annotation_store[obj_key].get(frame_idx, [])
         for idx, c in enumerate(clicks):
             x, y, lb = int(c["x"]), int(c["y"]), int(c["label"])
             color = "lime" if lb == 1 else "red"
             marker = "o" if lb == 1 else "x"
-            ann_ax.plot(x, y, marker=marker, color=color, markersize=8, markeredgewidth=2)
-            ann_ax.text(
+            point_artist = ann_ax.scatter(
+                [x],
+                [y],
+                marker=marker,
+                c=color,
+                s=64,
+                linewidths=2,
+            )
+            text_artist = ann_ax.text(
                 x + 6,
                 y,
                 f"{idx}:{lb}",
@@ -292,12 +551,14 @@ def create_annotation_ui(
                 fontsize=9,
                 bbox=dict(boxstyle="round,pad=0.2", facecolor="black", alpha=0.5),
             )
+            render_state["point_artists"].append(point_artist)
+            render_state["text_artists"].append(text_artist)
 
         with status_out:
             status_out.clear_output()
             print(
                 f"{status_prefix} 当前对象={object_specs[obj_key]['display']} "
-                f"frame={frame_idx} 点数={len(clicks)}"
+                f"frame={frame_idx} 点数={len(clicks)} trigger={trigger}"
             )
             print(f"{status_prefix} 点击图像可添加点；绿色=o=positive(1)，红色=x=negative(0)")
 
@@ -317,16 +578,16 @@ def create_annotation_ui(
         y = max(0, min(int(img_height) - 1, y))
 
         append_click(annotation_store, obj_key, frame_idx, x, y, point_label)
-        _draw_annotation_canvas()
+        _draw_annotation_canvas(trigger="click_add", force_draw=True)
 
     def _on_clear_clicked(_: Any) -> None:
         frame_idx, obj_key, _ = _current_ctx()
         if frame_idx in annotation_store[obj_key]:
             annotation_store[obj_key].pop(frame_idx, None)
-        _draw_annotation_canvas()
+        _draw_annotation_canvas(trigger="clear", force_draw=True, full_reset=True)
 
     def _on_refresh_clicked(_: Any) -> None:
-        _draw_annotation_canvas(force_draw=True)
+        _draw_annotation_canvas(trigger="refresh", force_draw=True, full_reset=True)
 
     def _on_frame_value_changed(change: Dict[str, Any]) -> None:
         if frame_sync_lock["active"]:
@@ -334,26 +595,47 @@ def create_annotation_ui(
         if change.get("name") != "value":
             return
         _sync_frame_value(change["new"])
-        _draw_annotation_canvas()
+        _draw_annotation_canvas(trigger="frame_change", force_draw=True, full_reset=True)
+
+    def _on_object_changed(change: Dict[str, Any]) -> None:
+        if change.get("name") != "value":
+            return
+        _draw_annotation_canvas(trigger="object_change", force_draw=True, full_reset=True)
+
+    def _on_label_changed(change: Dict[str, Any]) -> None:
+        if change.get("name") != "value":
+            return
+        _draw_annotation_canvas(trigger="label_change")
 
     def _on_export_clicked(_: Any) -> None:
         state.export_prompts = store_to_export_prompts(annotation_store, object_specs)
         state.use_visual_annotation_export = True
+
+        if save_json_on_export and export_json_path:
+            save_annotation_prompts_json(
+                export_prompts=state.export_prompts,
+                json_path=export_json_path,
+                status_prefix=status_prefix,
+            )
 
         if on_export is not None:
             on_export(state.export_prompts)
 
         with export_out:
             export_out.clear_output()
-            summary = {k: len(v) for k, v in state.export_prompts.items()}
+            summary = summarize_prompt_map(state.export_prompts)
             print(f"{status_prefix} 导出完成，已自动设置 USE_VISUAL_ANNOTATION_EXPORT=True")
-            print(f"{status_prefix} 各对象关键帧条目数: {summary}")
+            print(f"{status_prefix} 对象条目统计: {summary['entries_per_object']}")
+            print(f"{status_prefix} 对象点数统计: {summary['points_per_object']}")
+            print(f"{status_prefix} 含标注帧数: {summary['num_frames_with_prompts']}")
+            if save_json_on_export and export_json_path:
+                print(f"{status_prefix} JSON 文件: {export_json_path}")
             print(f"{status_prefix} 导出结构（可直接被 Stage A/B 消费）:")
             print(json.dumps(state.export_prompts, ensure_ascii=False, indent=2))
 
     frame_input.observe(_on_frame_value_changed, names="value")
-    object_dropdown.observe(lambda _: _draw_annotation_canvas(), names="value")
-    label_toggle.observe(lambda _: _draw_annotation_canvas(), names="value")
+    object_dropdown.observe(_on_object_changed, names="value")
+    label_toggle.observe(_on_label_changed, names="value")
     clear_btn.on_click(_on_clear_clicked)
     refresh_btn.on_click(_on_refresh_clicked)
     export_btn.on_click(_on_export_clicked)
@@ -381,7 +663,7 @@ def create_annotation_ui(
 
     if auto_display:
         display(controls)
-        _draw_annotation_canvas()
+        _draw_annotation_canvas(trigger="init")
         plt.show()
 
     return result
