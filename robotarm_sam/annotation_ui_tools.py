@@ -18,6 +18,10 @@ ANNOTATION_PROMPT_KEYS = (
     "GRIPPER_RIGHT_KEYFRAME_PROMPTS",
 )
 
+OPTIONAL_ANNOTATION_PROMPT_KEYS = (
+    "ARM_CABLE_2_INITIAL_PROMPTS",
+)
+
 LEGACY_ARM_PROMPT_KEYS = (
     "ARM_LEFT_INITIAL_PROMPTS",
     "ARM_RIGHT_INITIAL_PROMPTS",
@@ -40,8 +44,9 @@ def build_annotation_object_specs(
     arm_cable_obj_id: int,
     gripper_left_obj_id: int,
     gripper_right_obj_id: int,
+    arm_cable_obj_id_2: Optional[int] = None,
 ) -> AnnotationObjectSpecs:
-    return {
+    specs: AnnotationObjectSpecs = {
         "arm_cable": {
             "display": "机械臂+线缆",
             "obj_id": int(arm_cable_obj_id),
@@ -58,6 +63,13 @@ def build_annotation_object_specs(
             "target": "GRIPPER_RIGHT_KEYFRAME_PROMPTS",
         },
     }
+    if arm_cable_obj_id_2 is not None:
+        specs["arm_cable_2"] = {
+            "display": "第二机械臂",
+            "obj_id": int(arm_cable_obj_id_2),
+            "target": "ARM_CABLE_2_INITIAL_PROMPTS",
+        }
+    return specs
 
 
 def create_annotation_store(object_specs: Mapping[str, Mapping[str, Any]]) -> AnnotationStore:
@@ -179,6 +191,15 @@ def validate_export_prompt_map(prompt_map: Mapping[str, Any]) -> Dict[str, Promp
                 "当前已优先使用 ARM_CABLE_INITIAL_PROMPTS，旧字段将被忽略。"
             )
 
+        for opt_key in OPTIONAL_ANNOTATION_PROMPT_KEYS:
+            if opt_key in prompt_map:
+                val = prompt_map[opt_key]
+                if not isinstance(val, (list, tuple)):
+                    raise ValueError(f"[annotation] prompts[{opt_key}] 必须为 list")
+                normalized[opt_key] = list(val)
+            else:
+                normalized[opt_key] = []
+
         return normalized
 
     if has_any_legacy_arm_keys:
@@ -221,6 +242,15 @@ def validate_export_prompt_map(prompt_map: Mapping[str, Any]) -> Dict[str, Promp
             if not isinstance(prompt_list_raw, (list, tuple)):
                 raise ValueError(f"[annotation] prompts[{key}] 必须为 list")
             normalized[key] = list(prompt_list_raw)
+
+        for opt_key in OPTIONAL_ANNOTATION_PROMPT_KEYS:
+            if opt_key in prompt_map:
+                val = prompt_map[opt_key]
+                if not isinstance(val, (list, tuple)):
+                    raise ValueError(f"[annotation] prompts[{opt_key}] 必须为 list")
+                normalized[opt_key] = list(val)
+            else:
+                normalized[opt_key] = []
 
         return normalized
 
@@ -355,7 +385,11 @@ def summarize_prompt_map(prompt_map: Mapping[str, List[Dict[str, Any]]]) -> Dict
     frame_point_counts_per_object: Dict[str, Dict[int, int]] = {}
     unique_frames = set()
 
-    for key in ANNOTATION_PROMPT_KEYS:
+    all_summary_keys = list(ANNOTATION_PROMPT_KEYS) + [
+        k for k in OPTIONAL_ANNOTATION_PROMPT_KEYS if k in prompt_map
+    ]
+
+    for key in all_summary_keys:
         prompt_list = prompt_map.get(key, [])
         if not isinstance(prompt_list, list):
             raise ValueError(f"[annotation] prompts[{key}] 必须为 list")
