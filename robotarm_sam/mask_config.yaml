@@ -5,7 +5,7 @@
 
 # --- 任务标识 ---
 task_name: "task_0013"
-scene_name: "scene_0003"
+scene_name: "scene_0005"
 
 # --- 路径 ---
 # 视频帧目录完整路径：{data_base_dir}/{task_name}/train/{scene_name}/cam_105422061350/color
@@ -16,7 +16,7 @@ sam3_checkpoint: "/data/haoxiang/sam3/models/facebook/sam3/sam3.pt"
 export_base_dir: "/data/haoxiang/data/airexo2_processed"
 
 # --- 推理 ---
-cuda_visible_devices: "0,1,2,3"
+cuda_visible_devices: "1,2,3"
 apply_temporal_disambiguation: false
 
 # --- Object IDs ---
