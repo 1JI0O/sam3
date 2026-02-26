@@ -191,23 +191,25 @@ def validate_obj_id_constraints(
     arm_cable_prompts,
     gripper_left_prompts,
     gripper_right_prompts,
+    arm_cable_obj_id_2=None,
 ):
     obj_items = [
         ("arm_cable_obj_id", arm_cable_obj_id),
         ("gripper_left_obj_id", gripper_left_obj_id),
         ("gripper_right_obj_id", gripper_right_obj_id),
     ]
+    if arm_cable_obj_id_2 is not None:
+        obj_items.append(("arm_cable_obj_id_2", int(arm_cable_obj_id_2)))
 
     for name, obj_id in obj_items:
         if obj_id is None or not isinstance(obj_id, int):
             raise ValueError(f"{name} 不能为空且必须为 int，当前: {obj_id}")
 
     all_obj_ids = [obj_id for _, obj_id in obj_items]
-    if len(set(all_obj_ids)) != 3:
+    if len(set(all_obj_ids)) != len(all_obj_ids):
         raise ValueError(
-            "对象 ID 冲突：arm_cable_obj_id / gripper_left_obj_id / "
-            "gripper_right_obj_id 必须互不重复，当前="
-            f"{all_obj_ids}"
+            "对象 ID 冲突：所有已配置 obj_id 必须互不重复，当前="
+            f"{dict(obj_items)}"
         )
 
     def _check_prompt_obj_ids(prompt_list, expected_obj_id, prompt_tag):
