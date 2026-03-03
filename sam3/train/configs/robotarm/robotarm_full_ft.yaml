@@ -194,8 +194,8 @@ scratch:
   gradient_accumulation_steps: 4
   num_train_workers: 4
   num_val_workers: 0
-  max_data_epochs: 20
-  target_epoch_size: 1500
+  max_data_epochs: 30
+  target_epoch_size: 12000
   hybrid_repeats: 1
   context_length: 2
   gather_pred_via_filesys: false
@@ -207,9 +207,9 @@ scratch:
   lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
   lrd_vision_backbone: 0.9
   wd: 0.1
-  scheduler_timescale: 20
-  scheduler_warmup: 20
-  scheduler_cooldown: 20
+  scheduler_timescale: 5
+  scheduler_warmup: 3
+  scheduler_cooldown: 5
 
   collate_fn_val:
     _target_: sam3.train.data.collator.collate_fn_api
@@ -240,7 +240,7 @@ trainer:
   max_epochs: ${scratch.max_data_epochs}
   accelerator: cuda
   seed_value: 123
-  val_epoch_freq: 10
+  val_epoch_freq: 3
   mode: train
   gradient_accumulation_steps: ${scratch.gradient_accumulation_steps}
 
@@ -306,8 +306,8 @@ trainer:
   model:
     _target_: sam3.model_builder.build_sam3_image_model
     bpe_path: ${paths.bpe_path}
-    # 注意：这里沿用现有配置习惯使用 cpus 字符串
-    device: cpus
+    # 注意：cpus 已修正为 cpu
+    device: cpu
     eval_mode: false
     enable_segmentation: ${scratch.enable_segmentation}
     # 阶段B必配：显式注入起始checkpoint
@@ -391,7 +391,7 @@ trainer:
   checkpoint:
     # 阶段B必配
     save_dir: ${launcher.experiment_log_dir}/checkpoints
-    save_freq: 0
+    save_freq: 5
 
   logging:
     tensorboard_writer:
