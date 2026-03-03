@@ -11,9 +11,10 @@ scene_name: "scene_0014"
 # 视频帧目录完整路径：{data_base_dir}/{task_name}/train/{scene_name}/cam_105422061350/color
 data_base_dir: "/data/haoxiang/data/airexo2"
 # SAM3 模型权重
-sam3_checkpoint: "/data/haoxiang/sam3/models/facebook/sam3/sam3.pt"
+# sam3_checkpoint: "/data/haoxiang/sam3/models/facebook/sam3/sam3.pt"
+sam3_checkpoint: "/data/haoxiang/logs/airexo2_fine_tune/arm_without_gripper/checkpoints/checkpoint.pt"
 # 导出根目录：最终 mask 输出到 {export_base_dir}/{task_name}/{scene_name}
-export_base_dir: "/data/haoxiang/data/airexo2_processed"
+export_base_dir: "/data/haoxiang/data/airexo2_processed_test"
 
 # --- 推理 ---
 cuda_visible_devices: "0,1,2,3"

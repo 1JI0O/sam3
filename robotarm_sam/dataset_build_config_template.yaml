@@ -1,0 +1,37 @@
+# 阶段A数据集构建配置模板
+# 使用方式：
+#   python robotarm_sam/build_finetune_dataset.py --config robotarm_sam/dataset_build_config_template.yaml
+
+inputs:
+  data_base: /data/haoxiang/data/airexo2_processed
+  export_base: /data/haoxiang/data/airexo2_processed
+  output_dir: /data/haoxiang/data/airexo2_fine_tune
+  # 当前按单任务先跑通；如需全量可改回 []
+  task_list:
+    - task_0013
+
+sampling:
+  sample_stride: 30
+
+split:
+  # 自动划分：不提供 val_scenes 时，按 spec 使用排序后尾部 scene 作为 val
+  val_ratio: 0.2
+  # 手工划分：支持 task/scene（推荐）或 scene（全局唯一时）
+  val_scenes: []
+
+category:
+  id: 1
+  name: robot and cable
+
+paths:
+  # 适配当前目录：图像直接在 scene 目录下
+  image_glob_template: "{data_base}/{task}/{scene}/*.png"
+  # arm 掩码目录
+  mask_glob_template: "{export_base}/{task}/{scene}_ckpt_arm/*.png"
+
+reports:
+  # 构建历史文件（用于 R-A1/R-A2/R-A3 连续2次触发口径）
+  history_file: reports/build_history.jsonl
+
+# 可选：DEBUG/INFO/WARNING/ERROR
+log_level: INFO
