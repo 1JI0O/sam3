@@ -17,6 +17,7 @@ def _do_matching(cost, repeats=1, return_tgt_indices=False, do_filtering=False):
     if repeats > 1:
         cost = np.tile(cost, (1, repeats))
 
+    cost = np.nan_to_num(cost, nan=1e9, posinf=1e9, neginf=-1e9)
     i, j = linear_sum_assignment(cost)
     if do_filtering:
         # filter out invalid entries (i.e. those with cost > 1e8)
