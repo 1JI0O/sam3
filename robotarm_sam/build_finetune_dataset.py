@@ -1142,7 +1142,9 @@ def build_dataset(config: BuildConfig, logger: logging.Logger) -> Dict[str, Any]
             output_image_path = images_output_root / image_relpath
             output_image_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.copy2(image_path, output_image_path)
+                if output_image_path.exists() or output_image_path.is_symlink():
+                    output_image_path.unlink()
+                output_image_path.symlink_to(image_path.resolve())
             except Exception as exc:
                 counters["write_failures"] += 1
                 log_event(
