@@ -190,7 +190,7 @@ def fast_diag_box_iou(boxes1, boxes2):
 
     union = area1 + area2 - inter
 
-    iou = inter / union
+    iou = inter / union.clamp(min=1e-6)
 
     return iou
 
