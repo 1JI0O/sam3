@@ -868,9 +868,13 @@ class Trainer:
                             self.steps[phase],
                         )
 
-            # Catching NaN/Inf errors in the loss
+            # Catching NaN/Inf errors in the loss — skip batch, zero grads, continue
             except FloatingPointError as e:
-                raise e
+                logging.warning(
+                    f"Skipping batch {data_iter} at epoch {self.epoch} "
+                    f"due to NaN/Inf loss. Zeroing gradients."
+                )
+                self.optim.optimizer.zero_grad(set_to_none=True)
 
         self.est_epoch_time[Phase.TRAIN] = batch_time_meter.avg * iters_per_epoch
         self._log_timers(Phase.TRAIN)

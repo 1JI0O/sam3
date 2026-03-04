@@ -173,7 +173,7 @@ scratch:
     cost_giou: 2.0
     alpha: 0.25
     gamma: 2
-    stable: false
+    stable: true
   scale_by_find_batch_size: true
 
   # 图像参数
@@ -201,7 +201,7 @@ scratch:
   gather_pred_via_filesys: false
 
   # 学习率与调度（batch_size 从 4→8，LR 按线性缩放规则 ×2）
-  lr_scale: 0.2
+  lr_scale: 0.1
   lr_transformer: ${times:8e-4,${scratch.lr_scale}}
   lr_vision_backbone: ${times:2.5e-4,${scratch.lr_scale}}
   lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
