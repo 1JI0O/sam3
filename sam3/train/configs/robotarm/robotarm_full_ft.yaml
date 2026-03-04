@@ -401,7 +401,7 @@ trainer:
       should_log: true
     wandb_writer: null
     log_dir: ${launcher.experiment_log_dir}/logs/robotarm
-    log_freq: 100
+    log_freq: 20
 
 # ============================================================================
 # Launcher / Submitit
