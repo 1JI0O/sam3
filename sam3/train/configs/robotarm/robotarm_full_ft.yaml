@@ -192,7 +192,7 @@ scratch:
   train_batch_size: 8
   val_batch_size: 2
   gradient_accumulation_steps: 4
-  num_train_workers: 8
+  num_train_workers: 4
   num_val_workers: 0
   max_data_epochs: 30
   target_epoch_size: 12000
