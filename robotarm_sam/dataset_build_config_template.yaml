@@ -11,7 +11,7 @@ inputs:
     - task_0013
 
 sampling:
-  sample_stride: 1
+  sample_stride: 5
 
 split:
   # 自动划分：不提供 val_scenes 时，按 spec 使用排序后尾部 scene 作为 val
