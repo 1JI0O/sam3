@@ -842,10 +842,24 @@ class Trainer:
                         self.model, rank=self.distributed_rank, where=self.where
                     )
 
-                # Optimizer step: the scaler will make sure gradients are not
-                # applied if the gradients are infinite
-                self.scaler.step(self.optim.optimizer)
-                self.scaler.update()
+                # Guard: skip optimizer step if any gradient is NaN/Inf
+                # (GradScaler only skips on Inf, not NaN; NaN corrupts weights)
+                _nan_in_grads = any(
+                    p.grad is not None and not torch.isfinite(p.grad).all()
+                    for p in self.model.parameters()
+                )
+                if _nan_in_grads:
+                    logging.warning(
+                        f"NaN/Inf gradient at batch {data_iter} epoch {self.epoch},"
+                        " skipping optimizer step and zeroing gradients."
+                    )
+                    self.optim.optimizer.zero_grad(set_to_none=True)
+                    self.scaler.update()
+                else:
+                    # Optimizer step: the scaler will make sure gradients are not
+                    # applied if the gradients are infinite
+                    self.scaler.step(self.optim.optimizer)
+                    self.scaler.update()
 
                 # measure elapsed time
                 batch_time_meter.update(time.time() - end)
