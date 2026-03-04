@@ -187,12 +187,12 @@ scratch:
   val_norm_mean: [0.5, 0.5, 0.5]
   val_norm_std: [0.5, 0.5, 0.5]
 
-  # 训练资源（阶段B建议）
-  # 为匹配梯度累积（4），这里设为4，交由 chunking collate 切成4个micro-batch
-  train_batch_size: 4
-  val_batch_size: 1
+  # 训练资源（40GB GPU，控制在 ~32GB）
+  # batch_size=8，较原来 ×2，LR 同步 ×2
+  train_batch_size: 8
+  val_batch_size: 2
   gradient_accumulation_steps: 4
-  num_train_workers: 4
+  num_train_workers: 8
   num_val_workers: 0
   max_data_epochs: 30
   target_epoch_size: 12000
@@ -200,8 +200,8 @@ scratch:
   context_length: 2
   gather_pred_via_filesys: false
 
-  # 学习率与调度
-  lr_scale: 0.1
+  # 学习率与调度（batch_size 从 4→8，LR 按线性缩放规则 ×2）
+  lr_scale: 0.2
   lr_transformer: ${times:8e-4,${scratch.lr_scale}}
   lr_vision_backbone: ${times:2.5e-4,${scratch.lr_scale}}
   lr_language_backbone: ${times:5e-5,${scratch.lr_scale}}
@@ -401,7 +401,7 @@ trainer:
       should_log: true
     wandb_writer: null
     log_dir: ${launcher.experiment_log_dir}/logs/robotarm
-    log_freq: 10
+    log_freq: 100
 
 # ============================================================================
 # Launcher / Submitit
