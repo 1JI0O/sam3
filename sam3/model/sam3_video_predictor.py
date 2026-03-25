@@ -35,9 +35,11 @@ class Sam3VideoPredictor:
         async_loading_frames=False,
         video_loader_type="cv2",
         apply_temporal_disambiguation: bool = True,
+        device=None,
     ):
         self.async_loading_frames = async_loading_frames
         self.video_loader_type = video_loader_type
+        self.device = torch.device(device) if device is not None else torch.device("cuda")
         from sam3.model_builder import build_sam3_video_model
 
         self.model = (
@@ -48,8 +50,9 @@ class Sam3VideoPredictor:
                 geo_encoder_use_img_cross_attn=geo_encoder_use_img_cross_attn,
                 strict_state_dict_loading=strict_state_dict_loading,
                 apply_temporal_disambiguation=apply_temporal_disambiguation,
+                device=self.device,
             )
-            .cuda()
+            .to(device=self.device)
             .eval()
         )
 
@@ -312,6 +315,8 @@ class Sam3VideoPredictorMultiGPU(Sam3VideoPredictor):
         self.device = torch.device(f"cuda:{self.gpus_to_use[self.rank]}")
         torch.cuda.set_device(self.device)
         self.has_shutdown = False
+        model_kwargs = dict(model_kwargs)
+        model_kwargs["device"] = self.device
         if self.rank == 0:
             logger.info("\n\n\n\t*** START loading model on all ranks ***\n\n")
 

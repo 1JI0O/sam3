@@ -543,8 +543,8 @@ def create_annotation_ui(
     frame_min = 0
     frame_max = max(0, int(total_frames) - 1)
     for obj_key in object_specs.keys():
-        annotation_store[str(obj_key)] = {}
-    print(f"{status_prefix} 已清空历史标注缓存：本次会话从空白标注开始")
+        annotation_store.setdefault(str(obj_key), {})
+    print(f"{status_prefix} 保留已有标注缓存：若磁盘 JSON 已存在，重新运行后可继续追加")
 
     state = AnnotationUIState(
         annotation_store=annotation_store,
@@ -595,6 +595,15 @@ def create_annotation_ui(
         description="Object",
         layout=widgets.Layout(width="380px"),
     )
+    object_buttons = []
+    if len(object_options) <= 4:
+        for display_name, obj_key in object_options:
+            _btn = widgets.Button(
+                description=str(display_name),
+                layout=widgets.Layout(width="220px"),
+            )
+            _btn._annotation_object_key = obj_key
+            object_buttons.append(_btn)
 
     label_toggle = widgets.ToggleButtons(
         options=[("positive(1)", 1), ("negative(0)", 0)],
@@ -766,17 +775,28 @@ def create_annotation_ui(
             return
 
         frame_idx, obj_key, point_label = _current_ctx()
+        mouse_button = getattr(event, "button", None)
+        if mouse_button == 1:
+            point_label = 1
+        elif mouse_button == 3:
+            point_label = 0
+        elif mouse_button == 2:
+            return
+
         x = int(round(float(event.xdata)))
         y = int(round(float(event.ydata)))
         x = max(0, min(int(img_width) - 1, x))
         y = max(0, min(int(img_height) - 1, y))
 
         append_click(annotation_store, obj_key, frame_idx, x, y, point_label)
+        if int(label_toggle.value) != int(point_label):
+            label_toggle.value = int(point_label)
 
         current_points = len(annotation_store[obj_key].get(frame_idx, []))
         click_diag = (
             f"{status_prefix} [diag][write_target] frame_idx={frame_idx} object_key={obj_key} "
-            f"point={[x, y]} label={point_label} current_obj_frame_points={current_points}"
+            f"point={[x, y]} label={point_label} mouse_button={mouse_button} "
+            f"current_obj_frame_points={current_points}"
         )
         render_state["last_click_diag"] = click_diag
         print(click_diag)
@@ -809,12 +829,25 @@ def create_annotation_ui(
     def _on_object_changed(change: Dict[str, Any]) -> None:
         if change.get("name") != "value":
             return
+        _sync_object_button_styles()
         _draw_annotation_canvas(trigger="object_change", force_draw=True, full_reset=True)
 
     def _on_label_changed(change: Dict[str, Any]) -> None:
         if change.get("name") != "value":
             return
         _draw_annotation_canvas(trigger="label_change")
+
+    def _sync_object_button_styles() -> None:
+        for _btn in object_buttons:
+            _btn.button_style = "info" if getattr(_btn, "_annotation_object_key", None) == object_dropdown.value else ""
+
+    def _on_object_button_clicked(btn: Any) -> None:
+        target_obj_key = getattr(btn, "_annotation_object_key", None)
+        if target_obj_key is None:
+            return
+        object_dropdown.value = str(target_obj_key)
+        _sync_object_button_styles()
+        _draw_annotation_canvas(trigger="object_button", force_draw=True, full_reset=True)
 
     def _on_export_clicked(_: Any) -> None:
         state.export_prompts = store_to_export_prompts(annotation_store, object_specs)
@@ -880,15 +913,25 @@ def create_annotation_ui(
     frame_input.observe(_on_frame_value_changed, names="value")
     object_dropdown.observe(_on_object_changed, names="value")
     label_toggle.observe(_on_label_changed, names="value")
+    for _btn in object_buttons:
+        _btn.on_click(_on_object_button_clicked)
     clear_btn.on_click(_on_clear_clicked)
     clear_all_btn.on_click(_on_clear_all_clicked)
     refresh_btn.on_click(_on_refresh_clicked)
     export_btn.on_click(_on_export_clicked)
     ann_fig.canvas.mpl_connect("button_press_event", _on_canvas_click)
+    _sync_object_button_styles()
+
+    object_selector_row = widgets.HBox([frame_input, object_dropdown])
+    if object_buttons:
+        object_selector_row = widgets.VBox([
+            widgets.HBox([frame_input]),
+            widgets.HBox(object_buttons),
+        ])
 
     controls = widgets.VBox(
         [
-            widgets.HBox([frame_input, object_dropdown]),
+            object_selector_row,
             widgets.HBox([label_toggle]),
             widgets.HBox([clear_btn, clear_all_btn, refresh_btn, export_btn]),
             status_out,

@@ -4,21 +4,22 @@
 # ============================================================
 
 # --- 任务标识 ---
-task_name: "task_0013"
-scene_name: "scene_0014"
+task_name: "task0012_toys_basket_converted"
+scene_name: "scene_0001"
 
 # --- 路径 ---
-# 视频帧目录完整路径：{data_base_dir}/{task_name}/train/{scene_name}/cam_105422061350/color
-data_base_dir: "/data/haoxiang/data/airexo2"
+# 视频帧目录完整路径：{data_base_dir}/{task_name}/train/{scene_name}/{camera_name}/color
+data_base_dir: "/data/haoxiang/data/task0012_260321"
+camera_name: "cam_104122060902"
 # SAM3 模型权重
-# sam3_checkpoint: "/data/haoxiang/sam3/models/facebook/sam3/sam3.pt"
-sam3_checkpoint: "/data/haoxiang/logs/airexo2_fine_tune/arm_without_gripper/checkpoints/checkpoint.pt"
+sam3_checkpoint: "/data/haoxiang/sam3/models/facebook/sam3/sam3.pt"
+# sam3_checkpoint: "/data/haoxiang/logs/airexo2_fine_tune/arm_without_gripper/checkpoints/checkpoint.pt"
 # 导出根目录：最终 mask 输出到 {export_base_dir}/{task_name}/{scene_name}
-export_base_dir: "/data/haoxiang/data/airexo2_processed_test"
+export_base_dir: "/data/haoxiang/data/task0012_260321_masks_sam3"
 
 # --- 推理 ---
-cuda_visible_devices: "0,1,2,3"
-cuda_visible_devices_arm: "0,1"
+cuda_visible_devices: "2,3"
+cuda_visible_devices_arm: "2,3"
 cuda_visible_devices_gripper: "2,3"
 apply_temporal_disambiguation: false
 
@@ -34,7 +35,7 @@ arm_text_bootstrap_frame_index: 0
 
 # --- 可视化 ---
 vis_frame_stride: 30
-vis_max_plots: 10
+vis_max_plots: 20
 
 # --- 导出 / Merge ---
 export_arm_dilate_radius: 15       # arm mask 膨胀半径
